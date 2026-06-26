@@ -1,4 +1,5 @@
 mod commands;
+mod webdav;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -30,7 +31,33 @@ pub fn run() {
             commands::get_home_dir,
             commands::list_dirs,
             commands::get_file_icon,
+            commands::create_dir,
+            commands::create_file,
+            commands::remove,
+            commands::rename_item,
+            commands::copy_item,
+            commands::move_item,
             commands::open_file,
+            commands::webdav_connect,
+            commands::webdav_disconnect,
+            commands::webdav_list_sessions,
+            commands::webdav_list,
+            commands::webdav_read_binary,
+            commands::webdav_read_text,
+            commands::webdav_download,
+            commands::webdav_upload,
+            commands::webdav_create_dir,
+            commands::webdav_remove,
+            commands::webdav_rename,
+            commands::zip_list,
+            commands::zip_read_binary,
+            commands::zip_read_text,
+            commands::save_temp_file,
+            commands::window_minimize,
+            commands::window_toggle_maximize,
+            commands::window_close,
+            commands::window_start_drag,
+            commands::window_is_maximized,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

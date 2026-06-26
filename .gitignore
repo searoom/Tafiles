@@ -28,5 +28,9 @@ source/src-tauri/gen/schemas
 *.sln
 *.sw?
 
+# Build number / version
+build_number.txt
+source/public/build_info.json
+
 # Build output (root)
 tafiles.exe

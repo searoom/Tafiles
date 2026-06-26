@@ -1,7 +1,9 @@
 ﻿use image::GenericImageView;
 use serde::Serialize;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
 #[derive(Debug, Serialize)]
@@ -11,6 +13,50 @@ pub struct FileEntry {
     pub is_dir: bool,
     pub ext: String,
     pub size: u64,
+    pub modified: String,
+}
+
+fn format_modified_time(meta: &std::fs::Metadata) -> String {
+    use std::time::UNIX_EPOCH;
+    match meta.modified() {
+        Ok(time) => {
+            let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
+            let secs = duration.as_secs();
+            // Convert to local time using chrono-like manual calculation
+            // Simple approach: format timestamp as ISO-like string
+            let days_since_epoch = secs / 86400;
+            let time_of_day = secs % 86400;
+            let hours = time_of_day / 3600;
+            let minutes = (time_of_day % 3600) / 60;
+            let seconds = time_of_day % 60;
+
+            // Calculate year/month/day from days since epoch (1970-01-01)
+            let mut y = 1970i64;
+            let mut remaining = days_since_epoch as i64;
+            loop {
+                let days_in_year = if is_leap(y) { 366 } else { 365 };
+                if remaining < days_in_year { break; }
+                remaining -= days_in_year;
+                y += 1;
+            }
+            let month_days = if is_leap(y) { LEAP_MONTH_DAYS } else { MONTH_DAYS };
+            let mut m = 0;
+            for &md in month_days.iter() {
+                if remaining < md { break; }
+                remaining -= md;
+                m += 1;
+            }
+            let d = remaining + 1;
+            format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m + 1, d, hours, minutes, seconds)
+        }
+        Err(_) => String::new(),
+    }
+}
+
+const MONTH_DAYS: [i64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+const LEAP_MONTH_DAYS: [i64; 12] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+fn is_leap(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
 #[derive(Debug, Serialize)]
@@ -39,6 +85,7 @@ pub fn read_dir(path: String) -> Result<Vec<FileEntry>, String> {
             is_dir: meta.is_dir(),
             ext,
             size,
+            modified: format_modified_time(&meta),
         });
     }
     files.sort_by(|a, b| {
@@ -182,6 +229,7 @@ pub fn list_drives() -> Result<Vec<FileEntry>, String> {
                 is_dir: true,
                 ext: String::new(),
                 size: 0,
+                modified: String::new(),
             });
         }
     }
@@ -220,6 +268,7 @@ fn read_dir_list(path: &str) -> Result<Vec<FileEntry>, String> {
             is_dir: meta.is_dir(),
             ext,
             size,
+            modified: format_modified_time(&meta),
         });
     }
     files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -389,6 +438,137 @@ pub fn get_file_icon(_ext: String, _size: u32) -> Result<Vec<u8>, String> {
     Err("仅支持 Windows".to_string())
 }
 
+// ────────── WebDAV 命令 ──────────
+
+#[tauri::command]
+pub async fn webdav_connect(url: String, name: String, username: String, password: String) -> Result<crate::webdav::ConnectionInfo, String> {
+    crate::webdav::connect(&url, &name, &username, &password)
+}
+
+#[tauri::command]
+pub async fn webdav_disconnect(session_id: String) -> Result<(), String> {
+    crate::webdav::disconnect(&session_id)
+}
+
+#[tauri::command]
+pub async fn webdav_list_sessions() -> Result<Vec<crate::webdav::ConnectionInfo>, String> {
+    crate::webdav::list_sessions()
+}
+
+#[tauri::command]
+pub async fn webdav_list(session_id: String, path: String) -> Result<Vec<FileEntry>, String> {
+    crate::webdav::list(&session_id, &path).await
+}
+
+#[tauri::command]
+pub async fn webdav_read_binary(session_id: String, path: String) -> Result<Vec<u8>, String> {
+    crate::webdav::read_binary(&session_id, &path).await
+}
+
+#[tauri::command]
+pub async fn webdav_read_text(session_id: String, path: String) -> Result<String, String> {
+    crate::webdav::read_text(&session_id, &path).await
+}
+
+#[tauri::command]
+pub async fn webdav_download(session_id: String, path: String, app_handle: tauri::AppHandle) -> Result<String, String> {
+    crate::webdav::download(&session_id, &path, app_handle).await
+}
+
+#[tauri::command]
+pub async fn webdav_upload(session_id: String, local_path: String, remote_path: String) -> Result<(), String> {
+    crate::webdav::upload(&session_id, &local_path, &remote_path).await
+}
+
+#[tauri::command]
+pub async fn webdav_create_dir(session_id: String, path: String) -> Result<(), String> {
+    crate::webdav::create_dir(&session_id, &path).await
+}
+
+#[tauri::command]
+pub async fn webdav_remove(session_id: String, path: String) -> Result<(), String> {
+    crate::webdav::remove(&session_id, &path).await
+}
+
+#[tauri::command]
+pub async fn webdav_rename(session_id: String, from: String, to: String) -> Result<(), String> {
+    crate::webdav::rename(&session_id, &from, &to).await
+}
+
+#[tauri::command]
+pub fn create_dir(path: String) -> Result<(), String> {
+    fs::create_dir_all(&path).map_err(|e| format!("创建目录失败: {}", e))
+}
+
+#[tauri::command]
+pub fn create_file(path: String) -> Result<(), String> {
+    if let Some(parent) = Path::new(&path).parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+    }
+    fs::write(&path, []).map_err(|e| format!("创建文件失败: {}", e))
+}
+
+#[tauri::command]
+pub fn remove(path: String) -> Result<(), String> {
+    let meta = fs::metadata(&path).map_err(|e| format!("获取文件信息失败: {}", e))?;
+    if meta.is_dir() {
+        fs::remove_dir_all(&path).map_err(|e| format!("删除目录失败: {}", e))
+    } else {
+        fs::remove_file(&path).map_err(|e| format!("删除文件失败: {}", e))
+    }
+}
+
+#[tauri::command]
+pub fn rename_item(from: String, to: String) -> Result<(), String> {
+    if let Some(parent) = Path::new(&to).parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建目标目录失败: {}", e))?;
+    }
+    fs::rename(&from, &to).map_err(|e| format!("重命名失败: {}", e))
+}
+
+fn copy_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    if src.is_dir() {
+        fs::create_dir_all(dst).map_err(|e| format!("创建目录失败: {}", e))?;
+        for entry in fs::read_dir(src).map_err(|e| format!("读取目录失败: {}", e))? {
+            let entry = entry.map_err(|e| format!("读取条目失败: {}", e))?;
+            let file_type = entry.file_type().map_err(|e| format!("读取文件类型失败: {}", e))?;
+            let new_src = entry.path();
+            let new_dst = dst.join(entry.file_name());
+            if file_type.is_dir() {
+                copy_recursive(&new_src, &new_dst)?;
+            } else {
+                fs::copy(&new_src, &new_dst).map_err(|e| format!("复制文件失败: {}", e))?;
+            }
+        }
+    } else {
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+        }
+        fs::copy(src, dst).map_err(|e| format!("复制文件失败: {}", e))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn copy_item(from: String, to: String) -> Result<(), String> {
+    let src = Path::new(&from);
+    let dst = Path::new(&to);
+    copy_recursive(src, dst)
+}
+
+#[tauri::command]
+pub fn move_item(from: String, to: String) -> Result<(), String> {
+    rename_item(from.clone(), to.clone()).or_else(|_| {
+        copy_item(from.clone(), to.clone())?;
+        let meta = fs::metadata(&from).map_err(|e| format!("获取文件信息失败: {}", e))?;
+        if meta.is_dir() {
+            fs::remove_dir_all(&from).map_err(|e| format!("删除源目录失败: {}", e))
+        } else {
+            fs::remove_file(&from).map_err(|e| format!("删除源文件失败: {}", e))
+        }
+    })
+}
+
 #[tauri::command]
 pub fn open_file(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
@@ -413,4 +593,165 @@ pub fn open_file(path: String) -> Result<(), String> {
             .map_err(|e| format!("打开文件失败: {}", e))?;
     }
     Ok(())
+}
+
+fn get_zip_modified(mime_time: Option<zip::DateTime>) -> String {
+    match mime_time {
+        Some(dt) => {
+            format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), dt.second())
+        }
+        None => String::new(),
+    }
+}
+
+#[tauri::command]
+pub fn zip_list(zip_path: String, inner_path: String) -> Result<Vec<FileEntry>, String> {
+    let file = fs::File::open(&zip_path).map_err(|e| format!("无法打开 ZIP 文件: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("无法解析 ZIP 文件: {}", e))?;
+
+    let normalized_inner = if inner_path.is_empty() || inner_path == "/" {
+        String::new()
+    } else {
+        let s = inner_path.trim_start_matches('/').trim_end_matches('/');
+        if s.is_empty() { String::new() } else { format!("{}/", s) }
+    };
+
+    let mut entries: std::collections::HashMap<String, (bool, u64, String)> = std::collections::HashMap::new();
+
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).map_err(|e| format!("读取 ZIP 条目失败: {}", e))?;
+        let full_name = entry.name().to_string();
+        // Skip entries not under current prefix
+        if !full_name.starts_with(&normalized_inner) || full_name == normalized_inner {
+            continue;
+        }
+        let relative = full_name[normalized_inner.len()..].to_string();
+        if relative.is_empty() { continue; }
+
+        // Check if this is a direct child or nested deeper
+        let child_name = if let Some(slash_pos) = relative.find('/') {
+            let dir_name = &relative[..slash_pos];
+            let key = format!("{}{}/", normalized_inner, dir_name);
+            entries.entry(key).or_insert_with(|| (true, 0, String::new()));
+            continue;
+        } else {
+            relative
+        };
+
+        let key = format!("{}{}", normalized_inner, child_name);
+        let is_dir = entry.is_dir();
+        let size = entry.size();
+        let modified = get_zip_modified(entry.last_modified());
+        entries.entry(key).or_insert_with(|| (is_dir, size, modified));
+    }
+
+    let mut files: Vec<FileEntry> = entries.into_iter().map(|(path, (is_dir, size, modified))| {
+        let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or(&path).to_string();
+        let ext = if is_dir {
+            String::new()
+        } else {
+            name.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default()
+        };
+        FileEntry {
+            name,
+            path: format!("zip://{}/{}", zip_path, path),
+            is_dir,
+            ext,
+            size,
+            modified,
+        }
+    }).collect();
+
+    files.sort_by(|a, b| {
+        if a.is_dir != b.is_dir {
+            b.is_dir.cmp(&a.is_dir)
+        } else {
+            a.name.to_lowercase().cmp(&b.name.to_lowercase())
+        }
+    });
+    Ok(files)
+}
+
+#[tauri::command]
+pub fn zip_read_binary(zip_path: String, inner_path: String) -> Result<Vec<u8>, String> {
+    let file = fs::File::open(&zip_path).map_err(|e| format!("无法打开 ZIP 文件: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("无法解析 ZIP 文件: {}", e))?;
+    let inner = inner_path.trim_start_matches('/');
+    let mut entry = archive.by_name(inner).map_err(|e| format!("ZIP 中未找到文件: {}", e))?;
+    let mut buf = Vec::with_capacity(entry.size() as usize);
+    entry.read_to_end(&mut buf).map_err(|e| format!("读取 ZIP 文件失败: {}", e))?;
+    Ok(buf)
+}
+
+#[tauri::command]
+pub fn zip_read_text(zip_path: String, inner_path: String) -> Result<String, String> {
+    let bytes = zip_read_binary(zip_path, inner_path)?;
+    String::from_utf8(bytes).map_err(|e| format!("文件不是有效文本: {}", e))
+}
+
+// ── Window controls ──
+
+#[tauri::command]
+pub fn window_minimize(app: tauri::AppHandle) -> Result<(), String> {
+    app.get_webview_window("main")
+        .ok_or("主窗口未找到")?
+        .minimize()
+        .map_err(|e| format!("最小化失败: {}", e))
+}
+
+#[tauri::command]
+pub fn window_toggle_maximize(app: tauri::AppHandle) -> Result<(), String> {
+    let w = app.get_webview_window("main").ok_or("主窗口未找到")?;
+    if w.is_maximized().unwrap_or(false) {
+        w.unmaximize().map_err(|e| format!("还原失败: {}", e))
+    } else {
+        w.maximize().map_err(|e| format!("最大化失败: {}", e))
+    }
+}
+
+#[tauri::command]
+pub fn window_close(app: tauri::AppHandle) -> Result<(), String> {
+    app.get_webview_window("main")
+        .ok_or("主窗口未找到")?
+        .close()
+        .map_err(|e| format!("关闭失败: {}", e))
+}
+
+#[tauri::command]
+pub fn window_start_drag(app: tauri::AppHandle) -> Result<(), String> {
+    app.get_webview_window("main")
+        .ok_or("主窗口未找到")?
+        .start_dragging()
+        .map_err(|e| format!("拖拽失败: {}", e))
+}
+
+#[tauri::command]
+pub fn window_is_maximized(app: tauri::AppHandle) -> Result<bool, String> {
+    Ok(app.get_webview_window("main")
+        .ok_or("主窗口未找到")?
+        .is_maximized()
+        .map_err(|e| format!("读取状态失败: {}", e))?)
+}
+
+// ── Temp file ──
+
+#[tauri::command]
+pub fn save_temp_file(data: Vec<u8>, name: String) -> Result<String, String> {
+    let temp_dir = std::env::temp_dir().join("tafiles").join("extracted");
+    fs::create_dir_all(&temp_dir).map_err(|e| format!("创建临时目录失败: {}", e))?;
+    let file_path = temp_dir.join(&name);
+    // Avoid overwriting: add timestamp if exists
+    let file_path = if file_path.exists() {
+        let stem = file_path.file_stem().unwrap_or_default().to_string_lossy();
+        let ext = file_path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        temp_dir.join(format!("{}_{}{}", stem, ts, ext))
+    } else {
+        file_path
+    };
+    fs::write(&file_path, &data).map_err(|e| format!("写入临时文件失败: {}", e))?;
+    Ok(file_path.to_string_lossy().to_string())
 }

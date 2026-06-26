@@ -24,7 +24,8 @@
         >
           <template #default="{ node, data }">
             <span class="tree-node">
-              <el-icon :size="16">
+              <img v-if="fileIconMap['folder']" class="tree-folder-icon" :src="fileIconMap['folder']" />
+              <el-icon v-else :size="16">
                 <FolderOpened v-if="node.expanded" />
                 <Folder v-else />
               </el-icon>
@@ -33,19 +34,54 @@
           </template>
         </el-tree>
       </div>
+      <div class="sidebar-section">
+        网络驱动器
+        <el-button size="small" text class="sidebar-manage-btn" @click="showWebdavManager = true">
+          管理
+        </el-button>
+      </div>
+      <div class="webdav-list">
+        <div
+          v-for="conn in webdavStore.connections"
+          :key="conn.id"
+          class="sidebar-item"
+          :class="{ active: currentPath === 'webdav://' + conn.sessionId + '/' }"
+          @click="navigateToWebdav(conn.sessionId)"
+        >
+          <el-icon :size="16"><Connection /></el-icon>
+          <span class="sidebar-item-label">{{ conn.name }}</span>
+        </div>
+        <div v-if="webdavStore.connections.length === 0" class="sidebar-empty">
+          暂无连接
+        </div>
+      </div>
     </aside>
+
+    <WebdavManager v-if="showWebdavManager" v-model:visible="showWebdavManager" />
 
     <div class="resize-bar" @mousedown="onResizeStart"></div>
 
     <div class="main-area">
       <div class="toolbar">
-        <div class="breadcrumb">
-          <span class="bc-root" @click="navigateTo('')">此电脑</span>
+        <div v-if="breadcrumbEditing" class="breadcrumb breadcrumb-editing">
+          <input
+            ref="breadcrumbInputRef"
+            v-model="breadcrumbInputValue"
+            class="bc-input"
+            @keydown.enter="commitBreadcrumbEdit"
+            @keydown.escape="cancelBreadcrumbEdit"
+            @blur="commitBreadcrumbEdit"
+          />
+        </div>
+        <div v-else class="breadcrumb" @click="startBreadcrumbEdit">
+          <span class="bc-root" @click.stop="navigateTo('')">此电脑</span>
           <template v-for="(seg, i) in pathSegments" :key="i">
-            <span class="bc-sep">›</span>
+            <svg class="bc-sep" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="9 18 15 12 9 6"/>
+            </svg>
             <span
               :class="['bc-item', { active: i === pathSegments.length - 1 }]"
-              @click="navigateTo(seg.path)"
+              @click.stop="navigateTo(seg.path)"
             >{{ seg.name }}</span>
           </template>
         </div>
@@ -80,97 +116,134 @@
               <svg width="14" height="14" viewBox="0 0 14 14"><rect x="1" y="1.5" width="12" height="1.5" rx="0.5" :fill="viewMode === 'list' ? '#fff' : '#606266'"/><rect x="1" y="5.5" width="12" height="1.5" rx="0.5" :fill="viewMode === 'list' ? '#fff' : '#606266'"/><rect x="1" y="9.5" width="12" height="1.5" rx="0.5" :fill="viewMode === 'list' ? '#fff' : '#606266'"/></svg>
             </el-button>
           </el-button-group>
-          <el-button size="small" text @click="refreshList" title="刷新">
-            <el-icon><Refresh /></el-icon>
-          </el-button>
-          <el-button size="small" text @click="pickFolder" title="打开文件夹">
-            <el-icon><FolderOpened /></el-icon>
-          </el-button>
         </div>
       </div>
 
-      <div class="file-area" v-loading="loading">
-        <template v-if="!currentPath">
-          <div class="drives-grid">
-            <div
-              v-for="drive in drives" :key="drive.path"
-              class="drive-card"
-              @dblclick="navigateTo(drive.path)"
-            >
-              <el-icon :size="40" color="#909399"><Monitor /></el-icon>
-              <span class="drive-name">{{ drive.name }}</span>
-            </div>
-          </div>
-        </template>
-
-        <template v-else-if="!loading && files.length === 0">
-          <div class="empty-dir">该文件夹为空</div>
-        </template>
-
-        <template v-else>
-          <div v-if="viewMode === 'list'" class="file-list">
-            <div class="file-list-header">
-              <span class="col-name">名称</span>
-              <span class="col-size">大小</span>
-              <span class="col-type">类型</span>
-            </div>
-            <div
-              v-for="file in files" :key="file.path"
-              class="file-row"
-              @dblclick="handleDoubleClick(file)"
-            >
-              <span class="col-name">
-                <img v-if="file.is_dir && fileIconMap['folder']" class="type-icon-list" :src="fileIconMap['folder']" />
-                <img v-else-if="pathIconMap[file.path]" class="type-icon-list" :src="pathIconMap[file.path]" />
-                <img v-else-if="fileIconMap[file.ext]" class="type-icon-list" :src="fileIconMap[file.ext]" />
-                <el-icon v-else :size="16" color="#909399"><Document /></el-icon>
-                {{ file.name }}
-              </span>
-              <span class="col-size">{{ file.is_dir ? '' : formatSize(file.size) }}</span>
-              <span class="col-type">{{ file.is_dir ? '文件夹' : file.ext.toUpperCase() || '文件' }}</span>
-            </div>
-          </div>
-
-          <div v-else :class="['file-grid', `view-${viewMode}`]">
-            <div
-              v-for="file in files" :key="file.path"
-              class="file-item"
-              @dblclick="handleDoubleClick(file)"
-            >
-              <div class="file-thumb">
-                <template v-if="file.is_dir">
-                  <img class="folder-icon" :src="fileIconMap['folder'] || ''" v-if="fileIconMap['folder']" />
-                  <el-icon v-else :size="thumbIconSize" color="#409eff"><Folder /></el-icon>
-                </template>
-                <template v-else-if="isImage(file.ext) && thumbnailMap[file.path]">
-                  <img :src="thumbnailMap[file.path]" />
-                </template>
-                <template v-else-if="pathIconMap[file.path]">
-                  <img :src="pathIconMap[file.path]" :class="viewMode === 'large' ? 'type-icon-large' : (viewMode === 'medium' ? 'type-icon-medium' : 'type-icon-small')" />
-                </template>
-                <template v-else-if="fileIconMap[file.ext]">
-                  <img :src="fileIconMap[file.ext]" :class="viewMode === 'large' ? 'type-icon-large' : (viewMode === 'medium' ? 'type-icon-medium' : 'type-icon-small')" />
-                </template>
-                <template v-else>
-                  <el-icon :size="thumbIconSize" color="#909399"><Document /></el-icon>
-                </template>
+      <div class="file-area" ref="fileAreaRef" v-loading="loading" @contextmenu.prevent="onBackgroundContextMenu($event)">
+        <div class="file-area-inner" @mousedown="onAreaMouseDown">
+          <div
+            v-if="selectionBox.active"
+            class="selection-box"
+            :style="selectionBoxStyle"
+          ></div>
+          <template v-if="!currentPath">
+            <div class="drives-grid">
+              <div
+                v-for="drive in drives" :key="drive.path"
+                class="drive-card"
+                @dblclick="navigateTo(drive.path)"
+                @contextmenu.prevent="onDriveContextMenu($event, drive)"
+              >
+                <el-icon :size="40" color="#909399"><Monitor /></el-icon>
+                <span class="drive-name">{{ drive.name }}</span>
               </div>
-              <div class="file-name" :title="file.name">{{ file.name }}</div>
             </div>
-          </div>
-        </template>
+          </template>
+
+          <template v-else-if="!loading && files.length === 0">
+            <div class="empty-dir">该文件夹为空</div>
+          </template>
+
+          <template v-else>
+            <div v-if="viewMode === 'list'" class="file-list" :style="colVars">
+              <div class="file-list-header">
+                <span class="col-header col-name" @click="toggleSort('name')">
+                  名称
+                  <span v-if="sortCol === 'name'" class="sort-arrow">{{ sortDir === 'asc' ? '▲' : '▼' }}</span>
+                  <span class="col-resize" @mousedown.stop.prevent="startResize($event, 'name')"></span>
+                </span>
+                <span class="col-header col-size" @click="toggleSort('size')">
+                  大小
+                  <span v-if="sortCol === 'size'" class="sort-arrow">{{ sortDir === 'asc' ? '▲' : '▼' }}</span>
+                  <span class="col-resize" @mousedown.stop.prevent="startResize($event, 'size')"></span>
+                </span>
+                <span class="col-header col-type" @click="toggleSort('ext')">
+                  类型
+                  <span v-if="sortCol === 'ext'" class="sort-arrow">{{ sortDir === 'asc' ? '▲' : '▼' }}</span>
+                  <span class="col-resize" @mousedown.stop.prevent="startResize($event, 'type')"></span>
+                </span>
+                <span class="col-header col-date" @click="toggleSort('modified')">
+                  修改日期
+                  <span v-if="sortCol === 'modified'" class="sort-arrow">{{ sortDir === 'asc' ? '▲' : '▼' }}</span>
+                </span>
+              </div>
+              <div
+                v-for="file in sortedFiles" :key="file.path"
+                class="file-row"
+                :class="{ selected: selectedFiles.has(file.path) }"
+                @dblclick="handleDoubleClick(file, $event)"
+                @contextmenu.prevent="onFileContextMenu($event, file)"
+                @mousedown.left="onFileMouseDown($event, file)"
+              >
+                <span class="col-name">
+                  <img v-if="file.is_dir && fileIconMap['folder']" class="type-icon-list" :src="fileIconMap['folder']" />
+                  <img v-else-if="pathIconMap[file.path]" class="type-icon-list" :src="pathIconMap[file.path]" />
+                  <img v-else-if="fileIconMap[file.ext]" class="type-icon-list" :src="fileIconMap[file.ext]" />
+                  <el-icon v-else :size="16" color="#909399"><Document /></el-icon>
+                  {{ file.name }}
+                </span>
+                <span class="col-size">{{ file.is_dir ? '' : formatSize(file.size) }}</span>
+                <span class="col-type">{{ file.is_dir ? '文件夹' : file.ext.toUpperCase() || '文件' }}</span>
+                <span class="col-date">{{ file.modified || '' }}</span>
+              </div>
+            </div>
+
+            <div v-else :class="['file-grid', `view-${viewMode}`]">
+              <div
+                v-for="file in files" :key="file.path"
+                class="file-item"
+                :class="{ selected: selectedFiles.has(file.path) }"
+                @dblclick="handleDoubleClick(file, $event)"
+                @contextmenu.prevent="onFileContextMenu($event, file)"
+                @mousedown.left="onFileMouseDown($event, file)"
+              >
+                <div class="file-thumb">
+                  <template v-if="file.is_dir">
+                    <img class="folder-icon" :src="fileIconMap['folder'] || ''" v-if="fileIconMap['folder']" />
+                    <el-icon v-else :size="thumbIconSize" color="#409eff"><Folder /></el-icon>
+                  </template>
+                  <template v-else-if="isImage(file.ext) && thumbnailMap[file.path]">
+                    <img :src="thumbnailMap[file.path]" />
+                  </template>
+                  <template v-else-if="pathIconMap[file.path]">
+                    <img :src="pathIconMap[file.path]" :class="viewMode === 'large' ? 'type-icon-large' : (viewMode === 'medium' ? 'type-icon-medium' : 'type-icon-small')" />
+                  </template>
+                  <template v-else-if="fileIconMap[file.ext]">
+                    <img :src="fileIconMap[file.ext]" :class="viewMode === 'large' ? 'type-icon-large' : (viewMode === 'medium' ? 'type-icon-medium' : 'type-icon-small')" />
+                  </template>
+                  <template v-else>
+                    <el-icon :size="thumbIconSize" color="#909399"><Document /></el-icon>
+                  </template>
+                </div>
+                <div class="file-name" :title="file.name">{{ file.name }}</div>
+              </div>
+            </div>
+          </template>
+        </div>
       </div>
     </div>
+    <ContextMenu
+      :visible="contextMenu.visible"
+      :x="contextMenu.x"
+      :y="contextMenu.y"
+      :items="contextMenuItems"
+      @close="closeContextMenu"
+    />
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { Folder, FolderOpened, Document, Picture, Monitor, Download, Refresh } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { listen } from '@tauri-apps/api/event'
+import { Folder, FolderOpened, Document, Picture, Monitor, Download, Connection, Edit, EditPen, CopyDocument, Delete, Plus } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { imageExts } from '@/utils/fileType'
+import { useWebdavStore } from '@/stores/webdav'
+import { useTabsStore } from '@/stores/tabs'
+import WebdavManager from './WebdavManager.vue'
+import ContextMenu from './ContextMenu.vue'
 
 let previewableCache = null
 function isPreviewable(ext) {
@@ -185,9 +258,13 @@ function isPreviewable(ext) {
   return previewableCache.has((ext || '').toLowerCase())
 }
 
+const webdavStore = useWebdavStore()
+const tabsStore = useTabsStore()
+
+const errorMsg = ref('')
 const drives = ref([])
 const homeDir = ref('')
-const currentPath = ref('')
+const currentPath = ref(tabsStore.currentPath)
 const files = ref([])
 const loading = ref(false)
 const viewMode = ref(localStorage.getItem('tafiles-view-mode') || 'medium')
@@ -199,6 +276,680 @@ const pathIconMap = reactive({})
 const iconSizes = reactive({})
 const iconLoadingSet = new Set()
 const sidebarWidth = ref(Number(localStorage.getItem('tafiles-sidebar-width')) || 220)
+const showWebdavManager = ref(false)
+let unlistenSync = null
+
+// ── Context menu state ──
+const contextMenu = reactive({ visible: false, x: 0, y: 0, file: null })
+const clipboard = ref(null)
+
+// ── Selection state ──
+const selectedFiles = ref(new Set())
+let selAnchor = null // anchor path for shift-click range selection
+const isSelecting = ref(false)
+const selectionBox = reactive({ active: false, startX: 0, startY: 0, curX: 0, curY: 0 })
+const fileAreaRef = ref(null)
+
+// ── List view columns / sort ──
+const colW = reactive({ name: 300, size: 100, type: 90, date: 180 })
+const sortCol = ref('name')
+const sortDir = ref('asc')
+const colResizing = ref(null)
+
+const colVars = computed(() => ({
+  '--col-name-w': colW.name + 'px',
+  '--col-size-w': colW.size + 'px',
+  '--col-type-w': colW.type + 'px',
+  '--col-date-w': colW.date + 'px',
+}))
+
+const sortedFiles = computed(() => {
+  const arr = [...files.value]
+  const col = sortCol.value
+  const dir = sortDir.value === 'asc' ? 1 : -1
+  arr.sort((a, b) => {
+    // Directories always first
+    if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1
+    if (col === 'name') return dir * a.name.localeCompare(b.name)
+    if (col === 'size') return dir * (a.size - b.size)
+    if (col === 'ext') return dir * a.ext.localeCompare(b.ext)
+    if (col === 'modified') return dir * a.modified.localeCompare(b.modified)
+    return 0
+  })
+  return arr
+})
+
+function toggleSort(col) {
+  if (sortCol.value === col) {
+    sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc'
+  } else {
+    sortCol.value = col
+    sortDir.value = 'asc'
+  }
+}
+
+function startResize(e, col) {
+  colResizing.value = { col, startX: e.clientX, startW: colW[col] }
+  document.addEventListener('mousemove', onColResizeMove)
+  document.addEventListener('mouseup', onColResizeUp)
+}
+
+function onColResizeMove(e) {
+  if (!colResizing.value) return
+  const { col, startX, startW } = colResizing.value
+  const delta = e.clientX - startX
+  colW[col] = Math.max(60, startW + delta)
+}
+
+function onColResizeUp() {
+  colResizing.value = null
+  document.removeEventListener('mousemove', onColResizeMove)
+  document.removeEventListener('mouseup', onColResizeUp)
+}
+
+const selectionBoxStyle = computed(() => {
+  if (!selectionBox.active) return {}
+  const left = Math.min(selectionBox.startX, selectionBox.curX)
+  const top = Math.min(selectionBox.startY, selectionBox.curY)
+  const w = Math.abs(selectionBox.curX - selectionBox.startX)
+  const h = Math.abs(selectionBox.curY - selectionBox.startY)
+  return { left: left + 'px', top: top + 'px', width: w + 'px', height: h + 'px' }
+})
+
+function clearSelection() {
+  selectedFiles.value = new Set()
+}
+
+function selectFile(file, clearOthers) {
+  const s = new Set(selectedFiles.value)
+  if (clearOthers) s.clear()
+  if (s.has(file.path)) s.delete(file.path)
+  else s.add(file.path)
+  selectedFiles.value = s
+}
+
+function onFileMouseDown(e, file) {
+  if (e.button !== 0) return
+  if (e.ctrlKey || e.metaKey) {
+    selectFile(file, false)
+    selAnchor = file.path
+  } else if (e.shiftKey && selAnchor) {
+    const paths = files.value.map(f => f.path)
+    const anchorIdx = paths.indexOf(selAnchor)
+    const curIdx = paths.indexOf(file.path)
+    if (anchorIdx !== -1 && curIdx !== -1) {
+      const s = new Set()
+      const [start, end] = anchorIdx < curIdx ? [anchorIdx, curIdx] : [curIdx, anchorIdx]
+      for (let i = start; i <= end; i++) s.add(files.value[i].path)
+      selectedFiles.value = s
+    }
+  } else {
+    if (!selectedFiles.value.has(file.path)) {
+      selectedFiles.value = new Set([file.path])
+    }
+    selAnchor = file.path
+  }
+}
+
+function onAreaMouseDown(e) {
+  if (e.button !== 0) return
+  const target = e.target
+  if (target.closest('.file-item, .file-row, .drive-card, .file-list-header, .empty-dir')) return
+
+  clearSelection()
+  selAnchor = null
+  const rect = fileAreaRef.value?.getBoundingClientRect()
+  if (!rect) return
+  selectionBox.active = true
+  isSelecting.value = true
+  selectionBox.startX = e.clientX
+  selectionBox.startY = e.clientY
+  selectionBox.curX = e.clientX
+  selectionBox.curY = e.clientY
+
+  document.addEventListener('mousemove', onDocMouseMove)
+  document.addEventListener('mouseup', onDocMouseUp)
+}
+
+function onDocMouseMove(e) {
+  if (!isSelecting.value) return
+  selectionBox.curX = e.clientX
+  selectionBox.curY = e.clientY
+}
+
+function onDocMouseUp(e) {
+  if (!isSelecting.value) return
+  isSelecting.value = false
+  document.removeEventListener('mousemove', onDocMouseMove)
+  document.removeEventListener('mouseup', onDocMouseUp)
+
+  if (selectionBox.active) {
+    const dx = Math.abs(selectionBox.curX - selectionBox.startX)
+    const dy = Math.abs(selectionBox.curY - selectionBox.startY)
+    if (dx > 4 || dy > 4) {
+      const sel = new Set()
+      const box = getSelectionRect()
+      const items = fileAreaRef.value?.querySelectorAll('.file-row, .file-item')
+      if (items) {
+        for (let i = 0; i < items.length; i++) {
+          const r = items[i].getBoundingClientRect()
+          if (rectsOverlap(box, r)) {
+            if (files.value[i]) sel.add(files.value[i].path)
+          }
+        }
+      }
+      selectedFiles.value = sel
+    }
+    selectionBox.active = false
+  }
+}
+
+function getSelectionRect() {
+  return {
+    left: Math.min(selectionBox.startX, selectionBox.curX),
+    top: Math.min(selectionBox.startY, selectionBox.curY),
+    right: Math.max(selectionBox.startX, selectionBox.curX),
+    bottom: Math.max(selectionBox.startY, selectionBox.curY),
+  }
+}
+
+function rectsOverlap(a, b) {
+  return !(a.right < b.left || a.left > b.right || a.bottom < b.top || a.top > b.bottom)
+}
+
+function onFileContextMenu(e, file) {
+  // If clicked file is not in selection, select only it
+  if (!selectedFiles.value.has(file.path)) {
+    selectedFiles.value = new Set([file.path])
+  }
+  contextMenu.x = e.clientX
+  contextMenu.y = e.clientY
+  contextMenu.file = file
+  contextMenu.visible = true
+}
+
+function onBackgroundContextMenu(e) {
+  clearSelection()
+  contextMenu.x = e.clientX
+  contextMenu.y = e.clientY
+  contextMenu.file = null
+  contextMenu.visible = true
+}
+
+function onDriveContextMenu(e, drive) {
+  onFileContextMenu(e, { ...drive, is_dir: true })
+}
+
+function closeContextMenu() {
+  contextMenu.visible = false
+  contextMenu.file = null
+}
+
+const contextMenuItems = computed(() => {
+  if (!contextMenu.visible) return []
+  const file = contextMenu.file
+  if (!file) return buildBackgroundMenu()
+  if (isWebdavPath(file.path)) return buildWebdavMenu(file)
+  if (isZipPath(file.path)) return buildZipMenu(file)
+  return buildLocalMenu(file)
+})
+
+function buildBackgroundMenu() {
+  const items = []
+  if (currentPath.value) {
+    if (isZipPath(currentPath.value)) {
+      items.push({ label: '退出 ZIP', onClick: () => {
+        const parsed = parseZipPath(currentPath.value)
+        if (parsed) navigateTo(getParentPath(parsed.zipPath))
+      }})
+      items.push({ divider: true })
+    } else if (isWebdavPath(currentPath.value)) {
+      items.push({ label: '新建文件夹', onClick: handleWebdavBackgroundNewFolder })
+      if (clipboard.value) {
+        const disabled = clipboard.value.items.some(i => isWebdavPath(i.path))
+        if (!disabled) {
+          items.push({ divider: true })
+          items.push({ label: '粘贴', onClick: () => handlePaste(currentPath.value) })
+        }
+      }
+    } else {
+      items.push({ label: '新建文件夹', onClick: handleNewFolder })
+      items.push({ label: '新建文件', onClick: handleNewFile })
+      if (clipboard.value) {
+        items.push({ divider: true })
+        const disabled = clipboard.value.items.some(i => isWebdavPath(i.path))
+        items.push({ label: '粘贴', disabled, onClick: () => handlePaste(currentPath.value) })
+      }
+    }
+    items.push({ divider: true })
+  }
+  items.push({ label: '刷新', onClick: refreshList })
+  return items
+}
+
+function buildLocalMenu(file) {
+  const items = []
+  const multi = selectedFiles.value.size > 1
+
+  if (multi) {
+    // Multi-file context menu
+    items.push({ label: `复制 ${selectedFiles.value.size} 项`, onClick: handleMultiCopy })
+    items.push({ label: `剪切 ${selectedFiles.value.size} 项`, onClick: handleMultiCut })
+    items.push({ divider: true })
+    items.push({ label: `删除 ${selectedFiles.value.size} 项`, onClick: handleMultiDelete })
+    return items
+  }
+
+  if (file.is_dir) {
+    items.push({ label: '打开', onClick: () => navigateTo(file.path) })
+    items.push({ divider: true })
+    items.push({ label: '新建文件夹', onClick: () => handleNewFolderInDir(file.path) })
+    items.push({ divider: true })
+  } else {
+    items.push({ label: '打开', onClick: () => handleDoubleClick(file) })
+    if (isPreviewable(file.ext)) {
+      items.push({ label: '预览', onClick: () => openPreviewWindow(file) })
+    }
+    items.push({ divider: true })
+  }
+  items.push({ label: '重命名', onClick: () => handleRename(file) })
+  items.push({ label: '复制', onClick: () => handleCopy(file) })
+  items.push({ label: '剪切', onClick: () => handleCut(file) })
+  items.push({ divider: true })
+  items.push({ label: '删除', onClick: () => handleDelete(file) })
+  return items
+}
+
+function buildWebdavMenu(file) {
+  const items = []
+  const multi = selectedFiles.value.size > 1
+
+  if (multi) {
+    items.push({ label: `删除 ${selectedFiles.value.size} 项`, onClick: handleMultiWebdavDelete })
+    return items
+  }
+
+  if (file.is_dir) {
+    items.push({ label: '打开', onClick: () => navigateTo(file.path) })
+    items.push({ divider: true })
+    items.push({ label: '新建文件夹', onClick: () => handleWebdavNewFolder(file) })
+    items.push({ divider: true })
+  } else {
+    items.push({ label: '打开', onClick: () => handleWebdavFileClick(file) })
+    if (isPreviewable(file.ext)) {
+      items.push({ label: '预览', onClick: () => handleWebdavFileClick(file) })
+    }
+    items.push({ divider: true })
+  }
+  items.push({ label: '重命名', onClick: () => handleWebdavRename(file) })
+  items.push({ label: '复制', disabled: true })
+  items.push({ label: '剪切', disabled: true })
+  items.push({ divider: true })
+  items.push({ label: '删除', onClick: () => handleWebdavDelete(file) })
+  return items
+}
+
+function buildZipMenu(file) {
+  const items = []
+  const multi = selectedFiles.value.size > 1
+  if (multi) {
+    items.push({ label: `删除 ${selectedFiles.value.size} 项`, disabled: true })
+    return items
+  }
+  if (file.is_dir) {
+    items.push({ label: '打开', onClick: () => navigateTo(file.path) })
+  } else {
+    items.push({ label: '打开', onClick: () => handleDoubleClick(file) })
+    if (isPreviewable(file.ext)) {
+      items.push({ label: '预览', onClick: () => handleZipFileClick(file) })
+    }
+  }
+  return items
+}
+
+function getParentDir(filePath) {
+  const idx = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'))
+  if (idx <= 0) return filePath.slice(0, 1) + '/'
+  if (idx === 2 && filePath[1] === ':') return filePath.slice(0, 3) // C:\
+  return filePath.slice(0, idx)
+}
+
+function getFileName(filePath) {
+  const idx = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'))
+  if (idx === -1) return filePath
+  return filePath.slice(idx + 1)
+}
+
+// ── File operations ──
+
+async function handleNewFolder() {
+  try {
+    const { value } = await ElMessageBox.prompt('文件夹名称', '新建文件夹', {
+      confirmButtonText: '创建', cancelButtonText: '取消',
+      inputPattern: /.+/,
+      inputErrorMessage: '名称不能为空',
+    })
+    if (value) {
+      const folderPath = currentPath.value + '/' + value
+      await invoke('create_dir', { path: folderPath })
+      ElMessage.success('文件夹已创建')
+      refreshList()
+    }
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('创建文件夹失败: ' + String(e))
+  }
+}
+
+async function handleNewFolderInDir(dirPath) {
+  try {
+    const { value } = await ElMessageBox.prompt('文件夹名称', '新建文件夹', {
+      confirmButtonText: '创建', cancelButtonText: '取消',
+      inputPattern: /.+/,
+      inputErrorMessage: '名称不能为空',
+    })
+    if (value) {
+      await invoke('create_dir', { path: dirPath + '/' + value })
+      ElMessage.success('文件夹已创建')
+      refreshList()
+    }
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('创建文件夹失败: ' + String(e))
+  }
+}
+
+async function handleNewFile() {
+  try {
+    const { value } = await ElMessageBox.prompt('文件名称', '新建文件', {
+      confirmButtonText: '创建', cancelButtonText: '取消',
+      inputPattern: /.+/,
+      inputErrorMessage: '名称不能为空',
+    })
+    if (value) {
+      const filePath = currentPath.value + '/' + value
+      await invoke('create_file', { path: filePath })
+      ElMessage.success('文件已创建')
+      refreshList()
+    }
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('创建文件失败: ' + String(e))
+  }
+}
+
+async function handleRename(file) {
+  try {
+    const { value } = await ElMessageBox.prompt('新名称', '重命名', {
+      confirmButtonText: '确定', cancelButtonText: '取消',
+      inputValue: file.name,
+      inputPattern: /.+/,
+      inputErrorMessage: '名称不能为空',
+    })
+    if (value && value !== file.name) {
+      const parent = getParentDir(file.path)
+      const target = parent + '/' + value
+      await invoke('rename_item', { from: file.path, to: target })
+      ElMessage.success('重命名成功')
+      refreshList()
+    }
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('重命名失败: ' + String(e))
+  }
+}
+
+async function handleDelete(file) {
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除 "${file.name}" 吗？${file.is_dir ? '该操作将删除目录及其所有内容。' : ''}`,
+      '删除确认',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+    )
+    await invoke('remove', { path: file.path })
+    ElMessage.success('已删除')
+    refreshList()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('删除失败: ' + String(e))
+  }
+}
+
+// ── Multi-file operations ──
+
+function getSelectedPaths() {
+  return [...selectedFiles.value]
+}
+
+async function handleMultiCopy() {
+  const paths = getSelectedPaths()
+  if (paths.length === 0) return
+  clipboard.value = {
+    items: paths.map(p => ({ path: p, name: getFileName(p) })),
+    operation: 'copy',
+  }
+  ElMessage.success(`已复制 ${paths.length} 项`)
+}
+
+async function handleMultiCut() {
+  const paths = getSelectedPaths()
+  if (paths.length === 0) return
+  clipboard.value = {
+    items: paths.map(p => ({ path: p, name: getFileName(p) })),
+    operation: 'cut',
+  }
+  ElMessage.success(`已剪切 ${paths.length} 项`)
+}
+
+async function handleMultiDelete() {
+  const paths = getSelectedPaths()
+  if (paths.length === 0) return
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除选中的 ${paths.length} 项吗？`,
+      '批量删除确认',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+    )
+    for (const p of paths) {
+      await invoke('remove', { path: p })
+    }
+    ElMessage.success(`已删除 ${paths.length} 项`)
+    selectedFiles.value = new Set()
+    refreshList()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('删除失败: ' + String(e))
+  }
+}
+
+async function handleMultiWebdavDelete() {
+  const paths = getSelectedPaths()
+  if (paths.length === 0) return
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除选中的 ${paths.length} 项吗？`,
+      '批量删除确认',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+    )
+    for (const p of paths) {
+      const sessionId = getWebdavSessionId(p)
+      const remotePath = getWebdavRemotePath(p)
+      await invoke('webdav_remove', { sessionId, path: remotePath })
+    }
+    ElMessage.success(`已删除 ${paths.length} 项`)
+    selectedFiles.value = new Set()
+    refreshList()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('删除失败: ' + String(e))
+  }
+}
+
+function handleCopy(file) {
+  clipboard.value = {
+    items: [{ path: file.path, name: file.name }],
+    operation: 'copy',
+  }
+  ElMessage.success('已复制')
+}
+
+function handleCut(file) {
+  clipboard.value = {
+    items: [{ path: file.path, name: file.name }],
+    operation: 'cut',
+  }
+  ElMessage.success('已剪切')
+}
+
+async function handlePaste(dirPath) {
+  if (!clipboard.value) return
+  const { items, operation } = clipboard.value
+  try {
+    const isWebdavDest = isWebdavPath(dirPath)
+    for (const item of items) {
+      const name = getFileName(item.path)
+      if (isWebdavDest) {
+        // Upload local file to WebDAV
+        const sessionId = getWebdavSessionId(dirPath)
+        const remotePath = getWebdavRemotePath(dirPath)
+        const target = (remotePath + '/' + name).replace(/\/+/g, '/')
+        await invoke('webdav_upload', { sessionId, localPath: item.path, remotePath: target })
+        if (operation === 'cut') {
+          await invoke('remove', { path: item.path })
+        }
+      } else {
+        const target = dirPath + '/' + name
+        if (operation === 'copy') {
+          await invoke('copy_item', { from: item.path, to: target })
+        } else {
+          await invoke('move_item', { from: item.path, to: target })
+        }
+      }
+    }
+    ElMessage.success(operation === 'copy' ? '粘贴完成' : '移动完成')
+    clipboard.value = null
+    refreshList()
+  } catch (e) {
+    ElMessage.error('粘贴失败: ' + e)
+  }
+}
+
+// ── WebDAV file operations ──
+
+async function handleWebdavNewFolder(file) {
+  const sessionId = getWebdavSessionId(file.path)
+  const remotePath = getWebdavRemotePath(file.path)
+  try {
+    const { value } = await ElMessageBox.prompt('文件夹名称', '新建文件夹', {
+      confirmButtonText: '创建', cancelButtonText: '取消',
+      inputPattern: /.+/,
+      inputErrorMessage: '名称不能为空',
+    })
+    if (value) {
+      const target = (remotePath + '/' + value).replace(/\/+/g, '/')
+      await invoke('webdav_create_dir', { sessionId, path: target })
+      ElMessage.success('文件夹已创建')
+      refreshList()
+    }
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('创建文件夹失败: ' + String(e))
+  }
+}
+
+async function handleWebdavRename(file) {
+  const sessionId = getWebdavSessionId(file.path)
+  const remotePath = getWebdavRemotePath(file.path)
+  const parent = getParentDir(remotePath)
+  try {
+    const { value } = await ElMessageBox.prompt('新名称', '重命名', {
+      confirmButtonText: '确定', cancelButtonText: '取消',
+      inputValue: file.name,
+      inputPattern: /.+/,
+      inputErrorMessage: '名称不能为空',
+    })
+    if (value && value !== file.name) {
+      const target = (parent + '/' + value).replace(/\/+/g, '/')
+      await invoke('webdav_rename', { sessionId, from: remotePath, to: target })
+      ElMessage.success('重命名成功')
+      refreshList()
+    }
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('重命名失败: ' + String(e))
+  }
+}
+
+async function handleWebdavBackgroundNewFolder() {
+  const sessionId = getWebdavSessionId(currentPath.value)
+  const remotePath = getWebdavRemotePath(currentPath.value)
+  try {
+    const { value } = await ElMessageBox.prompt('文件夹名称', '新建文件夹', {
+      confirmButtonText: '创建', cancelButtonText: '取消',
+      inputPattern: /.+/,
+      inputErrorMessage: '名称不能为空',
+    })
+    if (value) {
+      const target = (remotePath + '/' + value).replace(/\/+/g, '/')
+      await invoke('webdav_create_dir', { sessionId, path: target })
+      ElMessage.success('文件夹已创建')
+      refreshList()
+    }
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('创建文件夹失败: ' + String(e))
+  }
+}
+
+async function handleWebdavDelete(file) {
+  const sessionId = getWebdavSessionId(file.path)
+  const remotePath = getWebdavRemotePath(file.path)
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除 "${file.name}" 吗？${file.is_dir ? '该操作将删除目录及其所有内容。' : ''}`,
+      '删除确认',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+    )
+    await invoke('webdav_remove', { sessionId, path: remotePath })
+    ElMessage.success('已删除')
+    refreshList()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('删除失败: ' + String(e))
+  }
+}
+
+function isWebdavPath(path) {
+  return webdavStore.isWebdavPath(path)
+}
+
+function parseWebdavPath(path) {
+  return webdavStore.parseWebdavPath(path)
+}
+
+function getWebdavSessionId(path) {
+  if (!isWebdavPath(path)) return ''
+  const rest = path.slice('webdav://'.length)
+  const slash = rest.indexOf('/')
+  return slash === -1 ? rest : rest.slice(0, slash)
+}
+
+function getWebdavRemotePath(path) {
+  const parsed = parseWebdavPath(path)
+  return parsed ? parsed.path : ''
+}
+
+// ── ZIP path helpers ──
+function isZipPath(path) {
+  return typeof path === 'string' && path.startsWith('zip://')
+}
+
+function parseZipPath(path) {
+  if (!isZipPath(path)) return null
+  const rest = path.slice(6)
+  // Match .zip or .cbz (case insensitive) followed by /, \, or end-of-string
+  const match = rest.match(/(\.zip|\.cbz)([\/\\]|$)/i)
+  if (!match) {
+    return { zipPath: rest, innerPath: '' }
+  }
+  const zipPath = rest.slice(0, match.index + match[1].length)
+  const innerPath = rest.slice(match.index + match[1].length).replace(/^[\/\\]+/, '')
+  return { zipPath, innerPath }
+}
+
+function buildZipPath(zipPath, innerPath) {
+  if (!innerPath) return 'zip://' + zipPath
+  return 'zip://' + zipPath + '/' + innerPath
+}
 
 let resizing = false
 let resizeStartX = 0
@@ -223,6 +974,39 @@ const quickAccessFolders = computed(() => {
 
 const pathSegments = computed(() => {
   if (!currentPath.value) return []
+  if (isWebdavPath(currentPath.value)) {
+    const parsed = parseWebdavPath(currentPath.value)
+    if (!parsed) return []
+    const conn = webdavStore.connections.find(c => c.sessionId === getWebdavSessionId(currentPath.value))
+    const rootName = conn ? conn.name : 'WebDAV'
+    if (!parsed.path || parsed.path === '/') return [{ name: rootName, path: currentPath.value }]
+    const parts = parsed.path.split('/').filter(Boolean)
+    const result = [{ name: rootName, path: 'webdav://' + getWebdavSessionId(currentPath.value) + '/' }]
+    let build = ''
+    for (const seg of parts) {
+      build += '/' + seg
+      result.push({
+        name: seg,
+        path: 'webdav://' + getWebdavSessionId(currentPath.value) + build,
+      })
+    }
+    return result
+  }
+  if (isZipPath(currentPath.value)) {
+    const parsed = parseZipPath(currentPath.value)
+    if (!parsed) return []
+    const zipName = parsed.zipPath.split(/[/\\]/).pop() || parsed.zipPath
+    if (!parsed.innerPath) return [{ name: zipName, path: currentPath.value }]
+    const parts = parsed.innerPath.split('/').filter(Boolean)
+    const zipRootPath = 'zip://' + parsed.zipPath
+    const result = [{ name: zipName, path: zipRootPath }]
+    let build = ''
+    for (const seg of parts) {
+      build += '/' + seg
+      result.push({ name: seg, path: 'zip://' + parsed.zipPath + build })
+    }
+    return result
+  }
   const normalized = currentPath.value.replace(/\/+/g, '\\').replace(/\\+$/, '')
   const segments = normalized.split('\\').filter(Boolean)
   const result = []
@@ -238,6 +1022,31 @@ const pathSegments = computed(() => {
   }
   return result
 })
+
+const breadcrumbEditing = ref(false)
+const breadcrumbInputValue = ref('')
+const breadcrumbInputRef = ref(null)
+
+function startBreadcrumbEdit() {
+  breadcrumbInputValue.value = currentPath.value
+  breadcrumbEditing.value = true
+  nextTick(() => {
+    breadcrumbInputRef.value?.select()
+  })
+}
+
+function commitBreadcrumbEdit() {
+  if (!breadcrumbEditing.value) return
+  breadcrumbEditing.value = false
+  const val = breadcrumbInputValue.value.trim()
+  if (val && val !== currentPath.value) {
+    navigateTo(val)
+  }
+}
+
+function cancelBreadcrumbEdit() {
+  breadcrumbEditing.value = false
+}
 
 function setViewMode(mode) {
   viewMode.value = mode
@@ -274,23 +1083,55 @@ function onResizeEnd() {
 
 async function navigateTo(path) {
   currentPath.value = path
+  tabsStore.updateCurrentTab(path)
   if (path) {
     await loadDir(path)
-    try { treeRef.value?.setCurrentKey(path) } catch {}
+    if (!isWebdavPath(path) && !isZipPath(path)) {
+      try { treeRef.value?.setCurrentKey(path) } catch {}
+    }
   } else {
     files.value = []
   }
 }
 
-async function loadDir(path) {
+async function loadDir(path, retried) {
   loading.value = true
   cleanupThumbnails()
   try {
-    files.value = await invoke('read_dir', { path })
-    if (viewMode.value !== 'list') loadThumbnails()
-    loadFileIconsForCurrentDir()
+    if (isWebdavPath(path)) {
+      const sessionId = getWebdavSessionId(path)
+      const remotePath = getWebdavRemotePath(path)
+      files.value = await invoke('webdav_list', { sessionId, path: remotePath || '/' })
+      loadFileIconsForCurrentDir()
+    } else if (isZipPath(path)) {
+      const parsed = parseZipPath(path)
+      if (parsed) {
+        files.value = await invoke('zip_list', { zipPath: parsed.zipPath, innerPath: parsed.innerPath })
+        loadFileIconsForCurrentDir()
+      } else {
+        files.value = []
+      }
+    } else {
+      files.value = await invoke('read_dir', { path })
+      if (viewMode.value !== 'list') loadThumbnails()
+      loadFileIconsForCurrentDir()
+    }
   } catch (e) {
-    ElMessage.error(String(e))
+    const msg = String(e)
+    console.error('loadDir error:', msg, e)
+    if (isWebdavPath(path) && (msg.includes('会话不存在') || msg.includes('已断开')) && !retried) {
+      const sessionId = getWebdavSessionId(path)
+      const ok = await webdavStore.ensureConnected(sessionId)
+      if (ok) {
+        const newSessionId = webdavStore.connections.find(c => c.id === sessionId)?.sessionId || sessionId
+        if (newSessionId !== sessionId) {
+          currentPath.value = path.replace('webdav://' + sessionId, 'webdav://' + newSessionId)
+        }
+        return loadDir(currentPath.value, true)
+      }
+    }
+    errorMsg.value = msg
+    ElMessage.error(msg)
     files.value = []
   } finally {
     loading.value = false
@@ -342,14 +1183,103 @@ function refreshList() {
   if (currentPath.value) loadDir(currentPath.value)
 }
 
-function handleDoubleClick(file) {
+function handleDoubleClick(file, event) {
+  const isCtrl = event?.ctrlKey || event?.metaKey
   if (file.is_dir) {
+    if (isCtrl) {
+      tabsStore.addTab(file.path)
+    }
     navigateTo(file.path)
+  } else if (['zip', 'cbz'].includes((file.ext || '').toLowerCase())) {
+    handleZipOrCbzClick(file, isCtrl)
+  } else if (isWebdavPath(file.path)) {
+    handleWebdavFileClick(file)
+  } else if (isZipPath(currentPath.value)) {
+    handleZipFileClick(file)
   } else if (isPreviewable(file.ext)) {
     openPreviewWindow(file)
   } else {
     invoke('open_file', { path: file.path }).catch(e => ElMessage.error(String(e)))
   }
+}
+
+async function handleZipOrCbzClick(file, isCtrl) {
+  if (isWebdavPath(file.path)) {
+    try {
+      const sessionId = getWebdavSessionId(file.path)
+      const remotePath = getWebdavRemotePath(file.path)
+      const tempPath = await invoke('webdav_download', { sessionId, path: remotePath })
+      const zipPath = 'zip://' + tempPath
+      tabsStore.addTab(zipPath)
+      navigateTo(zipPath)
+    } catch (e) {
+      ElMessage.error('下载 ZIP 文件失败: ' + e)
+    }
+  } else {
+    if (isCtrl) tabsStore.addTab('zip://' + file.path)
+    navigateTo('zip://' + file.path)
+  }
+}
+
+async function handleWebdavFileClick(file) {
+  const sessionId = getWebdavSessionId(file.path)
+  const remotePath = getWebdavRemotePath(file.path)
+
+  try {
+    const tempPath = await invoke('webdav_download', { sessionId, path: remotePath })
+    if (isPreviewable(file.ext)) {
+      openPreviewWindow({ path: tempPath, name: file.name, ext: file.ext, size: file.size })
+    } else {
+      await invoke('open_file', { path: tempPath })
+    }
+  } catch (e) {
+    ElMessage.error('文件操作失败: ' + e)
+  }
+}
+
+async function handleZipFileClick(file) {
+  const parsed = parseZipPath(file.path)
+  if (!parsed) return
+  try {
+    const data = await invoke('zip_read_binary', { zipPath: parsed.zipPath, innerPath: parsed.innerPath })
+    const tempPath = await invoke('save_temp_file', { data, name: file.name })
+    if (isPreviewable(file.ext)) {
+      openPreviewWindow({ path: tempPath, name: file.name, ext: file.ext, size: file.size })
+    } else {
+      await invoke('open_file', { path: tempPath }).catch(e => ElMessage.error(String(e)))
+    }
+  } catch (e) {
+    ElMessage.error('文件操作失败: ' + e)
+  }
+}
+
+async function navigateToWebdav(sessionId) {
+  const conn = webdavStore.connections.find(c => c.sessionId === sessionId || c.id === sessionId)
+  if (conn) {
+    if (!conn.password) {
+      try {
+        const { value } = await ElMessageBox.prompt(
+          `请输入 "${conn.name}" 的密码`,
+          'WebDAV 密码',
+          { inputType: 'password', confirmButtonText: '确定', cancelButtonText: '取消' }
+        )
+        if (value !== undefined) {
+          // updateConnection calls connect which creates a valid session
+          await webdavStore.updateConnection(conn.id, conn.name, conn.url, conn.username, value)
+        } else {
+          return
+        }
+      } catch {
+        return
+      }
+    } else {
+      // Has saved password, just ensure a fresh session for this launch
+      await webdavStore.ensureConnected(conn.id)
+    }
+    sessionId = conn.sessionId
+  }
+  const path = 'webdav://' + sessionId + '/'
+  await navigateTo(path)
 }
 
 const previewWindows = new Map()
@@ -533,6 +1463,19 @@ function handleKeydown(e) {
 }
 
 function getParentPath(path) {
+  if (isZipPath(path)) {
+    const parsed = parseZipPath(path)
+    if (!parsed) return ''
+    if (!parsed.innerPath) {
+      // At root of zip — go back to the directory containing the zip file
+      const zipDir = getParentPath(parsed.zipPath)
+      return zipDir
+    }
+    const parts = parsed.innerPath.replace(/\\/g, '/').split('/').filter(Boolean)
+    parts.pop()
+    const parentInner = parts.join('/')
+    return 'zip://' + parsed.zipPath + (parentInner ? '/' + parentInner : '')
+  }
   const normalized = path.replace(/\/+/g, '\\').replace(/\\+$/, '')
   const lastSep = normalized.lastIndexOf('\\')
   if (lastSep <= 0) {
@@ -546,8 +1489,53 @@ function getParentPath(path) {
 }
 
 onMounted(async () => {
+  console.log('FileBrowser onMounted start')
   await Promise.all([loadDrives(), loadHomeDir()])
+  console.log('FileBrowser onMounted homeDir=', homeDir.value, 'drives=', drives.value.length)
+
+  loadFileIcon('folder', 16)
   document.addEventListener('keydown', handleKeydown)
+
+  // ── Ensure at least one tab exists ──
+  if (tabsStore.tabs.length === 0) {
+    const defaultPath = homeDir.value || (drives.value[0] ? drives.value[0].path : '')
+    console.log('FileBrowser creating initial tab with path=', defaultPath)
+    tabsStore.addTab(defaultPath)
+  }
+  console.log('tabsStore state:', JSON.stringify(tabsStore.tabs.map(t => ({ id: t.id, path: t.path, title: t.title }))), 'activeId:', tabsStore.activeId)
+
+  // Sync current path from active tab
+  const tabPath = tabsStore.currentPath
+  console.log('FileBrowser syncing, tabPath=', tabPath, 'currentPath=', currentPath.value)
+  if (tabPath && tabPath !== currentPath.value) {
+    currentPath.value = tabPath
+    console.log('FileBrowser loading dir from onMounted:', tabPath)
+    loadDir(tabPath)
+  } else if (!currentPath.value) {
+    console.log('FileBrowser showing drives view')
+    files.value = []
+  }
+
+  unlistenSync = await listen('webdav-sync-status', (event) => {
+    webdavStore.updateSyncStatus(event.payload)
+  })
+  console.log('FileBrowser onMounted done')
+})
+
+// React to tab activation from title bar
+watch(() => tabsStore.activeId, (newId, oldId) => {
+  try {
+    if (newId && newId !== oldId) {
+      const path = tabsStore.currentPath
+      if (path !== currentPath.value) {
+        currentPath.value = path || ''
+        if (path) loadDir(path)
+        else files.value = []
+      }
+    }
+  } catch (e) {
+    console.error('Tab watch error:', e)
+  }
 })
 
 onBeforeUnmount(() => {
@@ -555,13 +1543,16 @@ onBeforeUnmount(() => {
   document.removeEventListener('keydown', handleKeydown)
   document.removeEventListener('mousemove', onResizeMove)
   document.removeEventListener('mouseup', onResizeEnd)
+  document.removeEventListener('mousemove', onColResizeMove)
+  document.removeEventListener('mouseup', onColResizeUp)
+  if (unlistenSync) unlistenSync()
 })
 </script>
 
 <style scoped>
 .file-browser {
   display: flex;
-  height: 100vh;
+  height: 100%;
   background: #fff;
 }
 
@@ -657,6 +1648,13 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
+.tree-folder-icon {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
 .tree-node-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -690,8 +1688,23 @@ onBeforeUnmount(() => {
   color: #606266;
   overflow: hidden;
   min-width: 0;
+  cursor: pointer;
 }
 
+.breadcrumb.breadcrumb-editing {
+  cursor: default;
+}
+.bc-input {
+  width: 100%;
+  border: 1px solid #409eff;
+  outline: none;
+  padding: 2px 6px;
+  font-size: 13px;
+  border-radius: 3px;
+  background: #fff;
+  color: #303133;
+  height: 26px;
+}
 .bc-root {
   cursor: pointer;
   color: #409eff;
@@ -744,6 +1757,20 @@ onBeforeUnmount(() => {
   flex: 1;
   overflow-y: auto;
   padding: 12px;
+  user-select: none;
+}
+
+.file-area-inner {
+  position: relative;
+  min-height: 100%;
+}
+
+.selection-box {
+  position: fixed;
+  background: rgba(64, 158, 255, 0.10);
+  border: 1px solid rgba(64, 158, 255, 0.40);
+  pointer-events: none;
+  z-index: 100;
 }
 
 .drives-grid {
@@ -784,12 +1811,15 @@ onBeforeUnmount(() => {
 /* List view */
 .file-list {
   width: 100%;
+  table-layout: fixed;
 }
 
 .file-list-header {
   display: flex;
-  align-items: center;
-  padding: 8px 12px;
+  align-items: stretch;
+  position: sticky;
+  top: 0;
+  z-index: 10;
   font-size: 12px;
   font-weight: 600;
   color: #909399;
@@ -797,10 +1827,45 @@ onBeforeUnmount(() => {
   background: #fafafa;
 }
 
+.col-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  flex-shrink: 0;
+  position: relative;
+  transition: background 0.1s;
+}
+
+.col-header:hover {
+  background: #e8edf3;
+}
+
+.sort-arrow {
+  font-size: 10px;
+  color: #409eff;
+}
+
+.col-resize {
+  position: absolute;
+  right: -3px;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 5;
+}
+
+.col-resize:hover {
+  background: rgba(64, 158, 255, 0.3);
+}
+
 .file-row {
   display: flex;
   align-items: center;
-  padding: 6px 12px;
   font-size: 13px;
   color: #303133;
   cursor: pointer;
@@ -812,15 +1877,55 @@ onBeforeUnmount(() => {
   background: #f0f2f5;
 }
 
-.col-name {
-  flex: 1;
+.file-row.context-selected,
+.file-item.context-selected,
+.file-row.selected,
+.file-item.selected {
+  background: #ecf5ff;
+}
+
+.col-name,
+.col-header.col-name {
+  width: var(--col-name-w);
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 8px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
+  padding: 6px 12px;
+}
+
+.col-size,
+.col-header.col-size {
+  width: var(--col-size-w);
+  flex-shrink: 0;
+  text-align: right;
+  padding: 6px 12px;
+  color: #909399;
+  white-space: nowrap;
+}
+
+.col-type,
+.col-header.col-type {
+  width: var(--col-type-w);
+  flex-shrink: 0;
+  text-align: right;
+  padding: 6px 12px;
+  color: #909399;
+  white-space: nowrap;
+}
+
+.col-date,
+.col-header.col-date {
+  width: var(--col-date-w);
+  flex-shrink: 0;
+  padding: 6px 12px;
+  color: #909399;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .type-icon-list {
@@ -828,20 +1933,6 @@ onBeforeUnmount(() => {
   height: 16px;
   object-fit: contain;
   flex-shrink: 0;
-}
-
-.col-size {
-  width: 90px;
-  text-align: right;
-  flex-shrink: 0;
-  color: #909399;
-}
-
-.col-type {
-  width: 80px;
-  text-align: right;
-  flex-shrink: 0;
-  color: #909399;
 }
 
 /* Grid views */
@@ -944,5 +2035,27 @@ onBeforeUnmount(() => {
 
 .view-small .file-name {
   font-size: 12px;
+}
+
+/* WebDAV sidebar */
+.sidebar-manage-btn {
+  float: right;
+  margin-top: -2px;
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.webdav-list {
+  flex-shrink: 0;
+  max-height: 200px;
+  overflow-y: auto;
+  margin-bottom: 4px;
+}
+
+.sidebar-empty {
+  padding: 6px 16px;
+  font-size: 12px;
+  color: #c0c4cc;
 }
 </style>
